@@ -1,6 +1,23 @@
 #!/usr/bin/env python
+#
+# Texecom Alarm Receiving Server
+# Copyright 2016 Mike Stirling
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# 
 
 import SocketServer
+import ConfigParser
 import logging
 import sys
 import paho.mqtt.client as mqtt
@@ -8,18 +25,44 @@ from daemonize import Daemonize
 from threading import Thread
 from binascii import hexlify
 
-# Args
-HOST = '0.0.0.0'
-PORT = 10001
 APP_NAME = 'alarmserver'
-LOG_FILE = 'alarm-server.log'
-PID_FILE = '/tmp/alarm-server.pid'
-POLLING_INTERVAL = 2
-MQTT_HOST = 'mqtt.example.com'
-MQTT_PORT = 8883
-MQTT_USER = 'user'
-MQTT_PASSWORD = 'password'
-MQTT_CAFILE = '/path/to/ca.crt'
+CONFIG_FILE = '/etc/alarmserver/alarmserver.conf'
+
+# Configuration defaults
+DEFAULTS = {
+	'server' : {
+		'host' : '0.0.0.0',
+		'port' : 10500,
+		'log_file' : '/tmp/alarmserver.log',
+		'pid_file' : '/tmp/alarmserver.pid',
+	},
+	'alarm' : {
+		'polling_interval' : 2,
+		'max_misses' : 1,
+	},
+	'mqtt' : {
+		'host' : '127.0.0.1',
+		'port' : 1883,
+		'username' : None,
+		'password' : None,
+		'cafile' : None
+	},
+}
+
+config = ConfigParser.ConfigParser()
+config.read(CONFIG_FILE)
+
+def get_config(section, option):
+	try:
+		value = config.get(section, option)
+	except (ConfigParser.NoOptionError, ConfigParser.NoSectionError):
+		value = DEFAULTS[section][option]
+	return value
+
+LOG_FILE = get_config('server', 'log_file')
+PID_FILE = get_config('server', 'pid_file')
+POLLING_INTERVAL = int(get_config('alarm', 'polling_interval'))
+MAX_MISSES = int(get_config('alarm', 'max_misses'))
 
 # Configure logging
 LOG_FORMAT = '%(asctime)-15s %(clientip)-15s %(message)s'
@@ -589,20 +632,32 @@ def on_mqtt_disconnect(client, userdata, rc):
 def on_mqtt_publish(client, userdata, mid):
 	logger.debug("MQTT publish complete", extra={'clientip': '0.0.0.0'})
 
-def main():
+def main():	
 	# Start threaded MQTT client
+	MQTT_HOST = get_config('mqtt', 'host')
+	MQTT_PORT = int(get_config('mqtt', 'port'))
+	MQTT_USERNAME = get_config('mqtt', 'username')
+	MQTT_PASSWORD = get_config('mqtt', 'password')
+	MQTT_CAFILE = get_config('mqtt', 'cafile')	
+	logger.info("Starting MQTT client for %s:%u" % (MQTT_HOST, MQTT_PORT), extra={'clientip': '0.0.0.0'})
+
 	client = mqtt.Client()
 	client.on_connect = on_mqtt_connect
 	client.on_disconnect = on_mqtt_disconnect
 	client.on_publish = on_mqtt_publish
-	client.tls_set(MQTT_CAFILE)
-	client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
+	if MQTT_CAFILE:
+		client.tls_set(MQTT_CAFILE)
+	if MQTT_USERNAME and MQTT_PASSWORD:
+		client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
 	client.connect(MQTT_HOST, MQTT_PORT, 60)
 	client.loop_start()
 
 	# Start ARC server
-	logger.info("Server started", extra={'clientip': '0.0.0.0'})
-	t = ThreadedTCPServer((HOST, PORT), TexecomService)
+	SERVER_HOST = get_config('server', 'host')
+	SERVER_PORT = int(get_config('server', 'port'))
+	logger.info("Starting alarm server on %s:%u" % (SERVER_HOST, SERVER_PORT), extra={'clientip': '0.0.0.0'})
+	
+	t = ThreadedTCPServer((SERVER_HOST, SERVER_PORT), TexecomService)
 	t.mqtt_client = client
 	t.serve_forever()
 
