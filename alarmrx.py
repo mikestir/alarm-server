@@ -20,8 +20,9 @@ import SocketServer
 import ConfigParser
 import logging
 import sys
+import daemon
+import lockfile
 import paho.mqtt.client as mqtt
-from daemonize import Daemonize
 from threading import Thread
 from binascii import hexlify
 
@@ -661,18 +662,19 @@ def main():
 	t.mqtt_client = client
 	t.serve_forever()
 
-def daemon_wrapper():
-	# Wrapper to divert exceptions to the log file when we run as a daemon
+if __name__ == '__main__':
+	if len(sys.argv)>1 and sys.argv[1] == '-d':
+		# Daemonize while retaining logger file handles
+		daemon = daemon.DaemonContext(
+			pidfile = lockfile.FileLock(PID_FILE),
+			files_preserve = [ fh.stream ],
+			)
+		logger.info("Daemonizing...", extra={'clientip': '0.0.0.0'})
+		daemon.open()
+
+	# Log exceptions
 	try:
 		main()
-	except Exception as err:
-		logger.error("Terminated due to exception: " + str(err), extra={'clientip': '0.0.0.0'})
-
-if len(sys.argv)>1 and sys.argv[1] == '-d':
-	daemon = Daemonize(app=APP_NAME, pid=PID_FILE, action=daemon_wrapper, keep_fds=[fh.stream.fileno()])
-	daemon.start()
-else:
-	main()
-
-
+	except Exception:
+		logger.exception("Terminated due to exception", extra={'clientip': '0.0.0.0'})
 
