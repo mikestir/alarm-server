@@ -18,7 +18,7 @@
 
 import SocketServer
 import ConfigParser
-import logging== True,
+import logging
 import sys
 import daemon
 import lockfile
