@@ -18,11 +18,13 @@
 
 import SocketServer
 import ConfigParser
-import logging
+import logging== True,
 import sys
 import daemon
 import lockfile
+import json
 import paho.mqtt.client as mqtt
+from datetime import datetime
 from threading import Thread
 from binascii import hexlify
 
@@ -40,6 +42,7 @@ DEFAULTS = {
 	'alarm' : {
 		'polling_interval' : 2,
 		'max_misses' : 1,
+		'account_file' : '/etc/alarmserver/accounts.conf'
 	},
 	'mqtt' : {
 		'host' : '127.0.0.1',
@@ -63,7 +66,6 @@ def get_config(section, option):
 LOG_FILE = get_config('server', 'log_file')
 PID_FILE = get_config('server', 'pid_file')
 POLLING_INTERVAL = int(get_config('alarm', 'polling_interval'))
-MAX_MISSES = int(get_config('alarm', 'max_misses'))
 
 # Configure logging
 LOG_FORMAT = '%(asctime)-15s %(clientip)-15s %(message)s'
@@ -557,13 +559,44 @@ class TexecomService(SocketServer.BaseRequestHandler):
 	debug = lambda self, msg: logger.debug(msg, extra={'clientip': self.client_address[0]})
 	error = lambda self, msg: logger.error(msg, extra={'clientip': self.client_address[0]})
 
+	# POLL flags (not all of these are verified - see docs)
+	FLAG_LINE_FAILURE = 1
+	FLAG_AC_FAILURE = 2
+	FLAG_BATTERY_FAILURE = 4
+	FLAG_ARMED = 8
+	FLAG_ENGINEER = 16
+
 	def handle_poll(self, data):
 		self.debug(data)
-		# FIXME: Decode account number, flags
+
+		try:
+			parts = data[4:].strip().split('#')
+			account = parts[0]
+			flags = ord(parts[1][0])
+		except:
+			self.error("Poll parse error")
+			return
+
+		self.info("Poll for a/c %s flags 0x%02x" % (account, flags))
 
 		# Send ack/polling delay in minutes
 		self.request.send('[P]\x00' + chr(POLLING_INTERVAL) + '\x06\r\n')
 		
+		# Post retained status update to broker
+		info = {
+			'client_ip': self.client_address[0],
+			'client_port': self.client_address[1],
+			'last_poll': datetime.now().isoformat(),
+			'interval': POLLING_INTERVAL * 60,
+			'flags_raw': flags,
+			'line_failure': (flags & self.FLAG_LINE_FAILURE) > 0,
+			'ac_failure': (flags & self.FLAG_AC_FAILURE) > 0,
+			'battery_failure': (flags & self.FLAG_BATTERY_FAILURE) > 0,
+			'armed': (flags & self.FLAG_ARMED) > 0,
+			'engineer': (flags & self.FLAG_ENGINEER) > 0,
+			}
+		self.server.mqtt_client.publish("/alarms/%s/status" % (account), json.dumps(info), qos=1, retain=True)
+
 	def handle_message(self, data, parser):
 		# Parse message
 		message = parser(self.client_address[0], data[1:])
@@ -578,11 +611,11 @@ class TexecomService(SocketServer.BaseRequestHandler):
 		# Send ACK
 		self.request.send(data[0] + '\x06\r\n')
 		
-		# Post message to broker
+		# Post event message to broker (not retained)
 		msg = "Area %d %s %s %d" % (message.area, message.event, message.value_name, message.value)
 		if message.extra_text:
 			msg = msg + " (" + message.extra_text + ")"
-		self.server.mqtt_client.publish("/alarms/%s/message" % (message.account_number), msg)
+		self.server.mqtt_client.publish("/alarms/%s/message" % (message.account_number), msg, qos=1, retain=False)
 
 	def handle(self):
 		self.debug("Client connected from %s:%s" % (self.client_address[0], self.client_address[1]))
