@@ -34,12 +34,14 @@ parser.add_argument('-N', dest='name', type=str,
                 help='User or zone name', default='')
 parser.add_argument('-m', dest='mode', type=int,
                 help='Operating mode: 2=ContactID, 3=SIA', default=2)
+parser.add_argument('-f', dest='flags', type=int,
+                help='Poller flags', default=0)
 
 args = parser.parse_args()
 print args
 
-def poll(sock, account):
-    sock.send("POLL%04u#\0\0\0\0\r\n" % (account))
+def poll(sock, account, flags):
+    sock.send("POLL%04u#%c\0\0\0\r\n" % (account, chr(flags)))
     
     reply = sock.recv(1024)
     if reply[0:3] == '[P]' and reply[5:] == '\x06\r\n':
@@ -47,7 +49,7 @@ def poll(sock, account):
         print "POLL OK"
         print "Server requested polling interval %u minutes" % (interval)
     else:
-        print "Bad reply to poll:", strip(reply)
+        print "Bad reply to poll:", reply.strip()
         
 def contactid(sock, account, qualifier, event, zone_or_user):
     account = ("%04u" % (account)).replace('0','A')
@@ -100,7 +102,7 @@ def sia(sock, account, event, zone_or_user, name):
     if reply == '3\x06\r\n':
         print "Ack received OK"
     else:
-        print "Bad reply to message:", strip(reply)
+        print "Bad reply to message:", reply.strip()
 
 
 # List of tests along with ContactID and SIA event codes
@@ -119,7 +121,7 @@ if __name__=='__main__':
     
     test = args.test[0]
     if test == 'poll':
-        poll(sock, args.account)
+        poll(sock, args.account, args.flags)
     else:
         try:
             (cid_qual, cid_event, sia_event) = TESTS[test]
