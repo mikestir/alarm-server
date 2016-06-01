@@ -65,10 +65,9 @@ def get_config(section, option):
 
 LOG_FILE = get_config('server', 'log_file')
 PID_FILE = get_config('server', 'pid_file')
-POLLING_INTERVAL = int(get_config('alarm', 'polling_interval'))
 
 # Configure logging
-LOG_FORMAT = '%(asctime)-15s %(clientip)-15s %(message)s'
+LOG_FORMAT = '%(asctime)-15s %(levelname)-6s %(tag)-15s %(message)s'
 logging.basicConfig(level=logging.DEBUG, format = LOG_FORMAT)
 logger = logging.getLogger(APP_NAME)
 
@@ -77,10 +76,63 @@ fh.setLevel(logging.DEBUG)
 fh.setFormatter(logging.Formatter(LOG_FORMAT))
 logger.addHandler(fh)
 
+class AccountManager(object):
+	error = lambda self, acc, msg: logger.error(msg, extra={'tag': acc})
+	info = lambda self, acc, msg: logger.info(msg, extra={'tag': acc})
+	debug = lambda self, acc, msg: logger.debug(msg, extra={'tag': acc})
+
+	# Polling timer tolerance (seconds)
+	POLLING_TOLERANCE = 30
+
+	def __init__(self):
+		self.MAX_MISSES = int(get_config('alarm', 'max_misses'))
+		self.ACCOUNT_FILENAME = get_config('alarm', 'account_file')
+		self.POLLING_INTERVAL = int(get_config('alarm', 'polling_interval'))
+
+		# Open and load list of accounts
+		# File should be formatted as <account number> <expected IP address>
+		self.accounts = {}
+		try:
+			with open(self.ACCOUNT_FILENAME) as f:
+				while True:
+					entry = f.readline().strip()
+					if not entry:
+						break
+					if entry[0] == '#':
+						continue
+					fields = entry.split()
+					if len(fields) < 2:
+						# Skip if row has less than 2 columns
+						continue
+					(account, ip) = fields[:2]
+					self.accounts[account] = dict(ip=ip, last_poll=None, missed=0)
+		except IOError:
+			# Missing account file just means no accounts
+			self.error('', 'Failed to open account file')
+
+	def polled(self, account):
+		try:
+			self.accounts[account]['last_poll'] = datetime.now()
+			self.accounts[account]['missed'] = 0
+			self.info(account, 'Poll received')
+		except KeyError:
+			self.error(account, 'Unknown account')
+
+	def get_ip(self, account):
+		try:
+			return self.accounts[account]['ip']
+		except KeyError:
+			self.error(account, 'Unknown account')
+			return None
+
+	def get_polling_interval(self, account):
+		return self.POLLING_INTERVAL
+
+
 class EventParser(object):
-	error = lambda self, msg: logger.error(type(self).__name__ + ': ' + msg, extra={'clientip': self.client_ip})
-	info = lambda self, msg: logger.info(type(self).__name__ + ': ' + msg, extra={'clientip': self.client_ip})
-	debug = lambda self, msg: logger.debug(type(self).__name__ + ': ' + msg, extra={'clientip': self.client_ip})
+	error = lambda self, msg: logger.error(type(self).__name__ + ': ' + msg, extra={'tag': self.client_ip})
+	info = lambda self, msg: logger.info(type(self).__name__ + ': ' + msg, extra={'tag': self.client_ip})
+	debug = lambda self, msg: logger.debug(type(self).__name__ + ': ' + msg, extra={'tag': self.client_ip})
 
 	# Defaults
 	client_ip = '0.0.0.0'
@@ -555,9 +607,9 @@ class SIA(EventParser):
 					self.error("Unknown event code " + event_code)
 
 class TexecomService(SocketServer.BaseRequestHandler):
-	info = lambda self, msg: logger.info(msg, extra={'clientip': self.client_address[0]})
-	debug = lambda self, msg: logger.debug(msg, extra={'clientip': self.client_address[0]})
-	error = lambda self, msg: logger.error(msg, extra={'clientip': self.client_address[0]})
+	error = lambda self, msg: logger.error(msg, extra={'tag': self.client_address[0]})
+	info = lambda self, msg: logger.info(msg, extra={'tag': self.client_address[0]})
+	debug = lambda self, msg: logger.debug(msg, extra={'tag': self.client_address[0]})
 
 	# POLL flags (not all of these are verified - see docs)
 	FLAG_LINE_FAILURE = 1
@@ -574,20 +626,30 @@ class TexecomService(SocketServer.BaseRequestHandler):
 			account = parts[0]
 			flags = ord(parts[1][0])
 		except:
-			self.error("Poll parse error")
+			self.error("POLL parse error")
 			return
 
 		self.info("Poll for a/c %s flags 0x%02x" % (account, flags))
 
+		# Check we recognise the account number and that
+		# the client IP matches
+		if self.server.account_manager.get_ip(account) != self.client_address[0]:
+			self.error("Invalid IP address for account %s" % (account))
+			return
+
 		# Send ack/polling delay in minutes
-		self.request.send('[P]\x00' + chr(POLLING_INTERVAL) + '\x06\r\n')
+		interval = self.server.account_manager.get_polling_interval(account)
+		self.request.send('[P]\x00' + chr(interval) + '\x06\r\n')
+
+		# Record poll event
+		self.server.account_manager.polled(account)
 		
 		# Post retained status update to broker
 		info = {
 			'client_ip': self.client_address[0],
 			'client_port': self.client_address[1],
 			'last_poll': datetime.now().isoformat(),
-			'interval': POLLING_INTERVAL * 60,
+			'interval': interval * 60,
 			'flags_raw': flags,
 			'line_failure': (flags & self.FLAG_LINE_FAILURE) > 0,
 			'ac_failure': (flags & self.FLAG_AC_FAILURE) > 0,
@@ -604,9 +666,12 @@ class TexecomService(SocketServer.BaseRequestHandler):
 		self.info("%s: a/c %s area %d %s %s %d %s" % (type(message).__name__, message.account_number, message.area, message.event, message.value_name, message.value, message.extra_text))
 		if message.description:
 			self.debug(message.description)
-		
-		# FIXME: Check we recognise the account number and that
+
+		# Check we recognise the account number and that
 		# the client IP matches
+		if self.server.account_manager.get_ip(message.account_number) != self.client_address[0]:
+			self.error("Invalid IP address for account %s" % (message.account_number))
+			return
 		
 		# Send ACK
 		self.request.send(data[0] + '\x06\r\n')
@@ -658,22 +723,25 @@ class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
 	pass
 
 def on_mqtt_connect(client, userdata, rc):
-	logger.info("MQTT connection established: %d" % (rc), extra={'clientip': '0.0.0.0'})
+	logger.info("MQTT connection established: %d" % (rc), extra={'tag': ''})
 
 def on_mqtt_disconnect(client, userdata, rc):
-	logger.info("MQTT connection lost: %d" % (rc), extra={'clientip': '0.0.0.0'})
+	logger.info("MQTT connection lost: %d" % (rc), extra={'tag': ''})
 
 def on_mqtt_publish(client, userdata, mid):
-	logger.debug("MQTT publish complete", extra={'clientip': '0.0.0.0'})
+	logger.debug("MQTT publish complete", extra={'tag': ''})
 
-def main():	
+def main():
+	# Start account manager
+	manager = AccountManager()
+
 	# Start threaded MQTT client
 	MQTT_HOST = get_config('mqtt', 'host')
 	MQTT_PORT = int(get_config('mqtt', 'port'))
 	MQTT_USERNAME = get_config('mqtt', 'username')
 	MQTT_PASSWORD = get_config('mqtt', 'password')
 	MQTT_CAFILE = get_config('mqtt', 'cafile')	
-	logger.info("Starting MQTT client for %s:%u" % (MQTT_HOST, MQTT_PORT), extra={'clientip': '0.0.0.0'})
+	logger.info("Starting MQTT client for %s:%u" % (MQTT_HOST, MQTT_PORT), extra={'tag': ''})
 
 	client = mqtt.Client()
 	client.on_connect = on_mqtt_connect
@@ -689,10 +757,11 @@ def main():
 	# Start ARC server
 	SERVER_HOST = get_config('server', 'host')
 	SERVER_PORT = int(get_config('server', 'port'))
-	logger.info("Starting alarm server on %s:%u" % (SERVER_HOST, SERVER_PORT), extra={'clientip': '0.0.0.0'})
+	logger.info("Starting alarm server on %s:%u" % (SERVER_HOST, SERVER_PORT), extra={'tag': ''})
 	
 	t = ThreadedTCPServer((SERVER_HOST, SERVER_PORT), TexecomService)
 	t.mqtt_client = client
+	t.account_manager = manager
 	t.serve_forever()
 
 if __name__ == '__main__':
@@ -702,12 +771,12 @@ if __name__ == '__main__':
 			pidfile = lockfile.FileLock(PID_FILE),
 			files_preserve = [ fh.stream ],
 			)
-		logger.info("Daemonizing...", extra={'clientip': '0.0.0.0'})
+		logger.info("Daemonizing...", extra={'tag': ''})
 		daemon.open()
 
 	# Log exceptions
 	try:
 		main()
 	except Exception:
-		logger.exception("Terminated due to exception", extra={'clientip': '0.0.0.0'})
+		logger.exception("Terminated due to exception", extra={'tag': ''})
 
