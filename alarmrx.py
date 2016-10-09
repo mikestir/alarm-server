@@ -648,6 +648,7 @@ class TexecomService(SocketServer.BaseRequestHandler):
 		info = {
 			'client_ip': self.client_address[0],
 			'client_port': self.client_address[1],
+			'account': account,
 			'last_poll': datetime.now().isoformat(),
 			'interval': interval * 60,
 			'flags_raw': flags,
@@ -677,6 +678,17 @@ class TexecomService(SocketServer.BaseRequestHandler):
 		self.request.send(data[0] + '\x06\r\n')
 		
 		# Post event message to broker (not retained)
+		info = {
+			'client_ip': self.client_address[0],
+			'client_port': self.client_address[1],
+			'account': message.account_number,
+			'area': message.area,
+			'event': message.event,
+			'value': message.value,
+			'value_type': message.value_name,
+			'extra_text': message.extra_text,
+			}
+		self.server.mqtt_client.publish("/alarms/%s/event" % (message.account_number), json.dumps(info), qos=1, retain=False)
 		msg = "Area %d %s %s %d" % (message.area, message.event, message.value_name, message.value)
 		if message.extra_text:
 			msg = msg + " (" + message.extra_text + ")"
