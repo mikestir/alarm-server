@@ -648,8 +648,8 @@ class TexecomService(SocketServer.BaseRequestHandler):
 		info = {
 			'client_ip': self.client_address[0],
 			'client_port': self.client_address[1],
-			'account': account,
-			'last_poll': datetime.now().isoformat(),
+			'account': int(account),
+			'timestamp': datetime.now().isoformat(),
 			'interval': interval * 60,
 			'flags_raw': flags,
 			'line_failure': (flags & self.FLAG_LINE_FAILURE) > 0,
@@ -681,7 +681,8 @@ class TexecomService(SocketServer.BaseRequestHandler):
 		info = {
 			'client_ip': self.client_address[0],
 			'client_port': self.client_address[1],
-			'account': message.account_number,
+			'account': int(message.account_number),
+			'timestamp': datetime.now().isoformat(),
 			'area': message.area,
 			'event': message.event,
 			'value': message.value,
