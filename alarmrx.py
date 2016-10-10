@@ -24,8 +24,9 @@ import daemon
 import lockfile
 import json
 import paho.mqtt.client as mqtt
-from datetime import datetime
-from threading import Thread
+import time
+from datetime import datetime, timedelta
+from threading import Thread, Lock
 from binascii import hexlify
 
 APP_NAME = 'alarmserver'
@@ -89,6 +90,10 @@ class AccountManager(object):
 		self.ACCOUNT_FILENAME = get_config('alarm', 'account_file')
 		self.POLLING_INTERVAL = int(get_config('alarm', 'polling_interval'))
 
+		self.account_lock = Lock()
+		self.watchdog_running = False
+		self.polling_timeout = timedelta(minutes=self.POLLING_INTERVAL, seconds=self.POLLING_TOLERANCE)
+
 		# Open and load list of accounts
 		# File should be formatted as <account number> <expected IP address>
 		self.accounts = {}
@@ -105,18 +110,87 @@ class AccountManager(object):
 						# Skip if row has less than 2 columns
 						continue
 					(account, ip) = fields[:2]
-					self.accounts[account] = dict(ip=ip, last_poll=None, missed=0)
+					self.accounts[account] = dict(ip=ip, last_poll=None, timeout=None, missed=0)
 		except IOError:
 			# Missing account file just means no accounts
 			self.error('', 'Failed to open account file')
 
+	def publish_polling_event(self, account, state):
+		# Post event message to broker (not retained)
+		info = {
+			'client_ip': '',
+			'client_port': 0,
+			'account': int(account),
+			'timestamp': datetime.now().isoformat(),
+			'area': 0,
+			'value': 0,
+			'value_type': '',
+			'extra_text': '',
+			}
+		if state:
+			info['event'] = 'Polling restored'
+			msg = 'Polling restored'
+		else:
+			info['event'] = 'Polling timeout'
+			msg = 'Polling timeout'
+		self.mqtt_client.publish("/alarms/%s/event" % (account), json.dumps(info), qos=1, retain=False)
+		self.mqtt_client.publish("/alarms/%s/message" % (account), msg, qos=1, retain=False)
+
+	def start_polling_watchdog(self):
+		# Initialise polling timeouts
+		for k,acc in self.accounts.iteritems():
+			acc['timeout'] = datetime.now() + self.polling_timeout
+
+		# Start timer for polling monitor
+		self.watchdog_running = True
+		self.watchdog_thread = Thread(target = self.watchdog_func)
+		self.watchdog_thread.daemon = True
+		self.watchdog_thread.start()
+
+	def stop_polling_watchdog(self):
+		self.watchdog_running = False
+		self.watchdog_thread.join()
+
+	def watchdog_func(self):
+		while self.watchdog_running:
+			self.account_lock.acquire()
+
+			# Check for missed polls every few seconds.  Doesn't really
+			# matter if we are a few seconds late
+			now = datetime.now()
+			for k,acc in self.accounts.iteritems():
+				if acc['timeout'] < now:
+					# Account has missed a poll event
+					acc['missed'] = acc['missed'] + 1
+					acc['timeout'] = now + self.polling_timeout
+					self.info(k, "Polling deadline missed (%d/%d)" % (acc['missed'], self.MAX_MISSES))
+					if acc['missed'] == self.MAX_MISSES:
+						# Generate polling error event
+						self.error(k, "Polling alert")
+						self.publish_polling_event(k, False)
+
+			self.account_lock.release()
+			time.sleep(5)
+
 	def polled(self, account):
+		self.account_lock.acquire()
+
 		try:
-			self.accounts[account]['last_poll'] = datetime.now()
-			self.accounts[account]['missed'] = 0
 			self.info(account, 'Poll received')
+			acc = self.accounts[account]
+			if acc['missed'] > 0:
+				# Generate polling restored event
+				self.info(account, "Polling recovered after %d misses" % (acc['missed']))
+				self.publish_polling_event(account, True)
+
+			now = datetime.now()
+			acc['last_poll'] = now
+			acc['timeout'] = now + self.polling_timeout
+			acc['missed'] = 0
 		except KeyError:
 			self.error(account, 'Unknown account')
+
+		self.account_lock.release()
 
 	def get_ip(self, account):
 		try:
@@ -772,6 +846,10 @@ def main():
 	SERVER_PORT = int(get_config('server', 'port'))
 	logger.info("Starting alarm server on %s:%u" % (SERVER_HOST, SERVER_PORT), extra={'tag': ''})
 	
+	# Start monitoring missed polls
+	manager.start_polling_watchdog()
+	manager.mqtt_client = client
+
 	t = ThreadedTCPServer((SERVER_HOST, SERVER_PORT), TexecomService)
 	t.mqtt_client = client
 	t.account_manager = manager
