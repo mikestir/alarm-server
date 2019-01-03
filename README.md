@@ -1,4 +1,4 @@
-# alarm-server
+# alarm-server Configuration
 ## Installing
 alarm-server requires some python dependencies to run. 
 
@@ -15,6 +15,7 @@ pip install python-daemon
 ### Configuring allowed panel addresses
 - Allowed panel addresses should be entered in tab separated format innto `/etc/alarmserver/accounts.conf` (or wherever you configure this file to be - see `alarmserver.conf`)
 - Example: `1234 192.168.1.2` where `1234` is the account number you configure in Wintex/On Panel.
+
 ## Configuring the Alarm Panel
 The simplest method to configure the server and panel communication is to use Wintex to configure the ARC settings.
 ### Using Wintex
