@@ -1,7 +1,7 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Texecom Alarm Receiving Server
-# Copyright 2016 Mike Stirling
+# Copyright 2016-2020 Mike Stirling
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,8 +16,8 @@
 # limitations under the License.
 # 
 
-import SocketServer
-import ConfigParser
+import socketserver
+import configparser
 import logging
 import sys
 import daemon
@@ -54,13 +54,13 @@ DEFAULTS = {
 	},
 }
 
-config = ConfigParser.ConfigParser()
+config = configparser.ConfigParser()
 config.read(CONFIG_FILE)
 
 def get_config(section, option):
 	try:
 		value = config.get(section, option)
-	except (ConfigParser.NoOptionError, ConfigParser.NoSectionError):
+	except (configparser.NoOptionError, configparser.NoSectionError):
 		value = DEFAULTS[section][option]
 	return value
 
@@ -680,7 +680,7 @@ class SIA(EventParser):
 				except KeyError:
 					self.error("Unknown event code " + event_code)
 
-class TexecomService(SocketServer.BaseRequestHandler):
+class TexecomService(socketserver.BaseRequestHandler):
 	error = lambda self, msg: logger.error(msg, extra={'tag': self.client_address[0]})
 	info = lambda self, msg: logger.info(msg, extra={'tag': self.client_address[0]})
 	debug = lambda self, msg: logger.debug(msg, extra={'tag': self.client_address[0]})
@@ -806,7 +806,7 @@ class TexecomService(SocketServer.BaseRequestHandler):
 		self.debug("Client disconnected")
 		self.request.close()
 
-class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
+class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 	pass
 
 def on_mqtt_connect(client, userdata, rc):
