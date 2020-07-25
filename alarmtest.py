@@ -18,6 +18,7 @@
 
 import socket
 from argparse import ArgumentParser
+from functools import reduce
 
 parser = ArgumentParser(description='Test tool for SIA and ContactID')
 parser.add_argument('test', type=str, nargs=1,
@@ -41,15 +42,15 @@ args = parser.parse_args()
 print(args)
 
 def poll(sock, account, flags):
-    sock.send("POLL%04u#%c\0\0\0\r\n" % (account, chr(flags)))
+    sock.send(("POLL%04u#%c\0\0\0\r\n" % (account, chr(flags))).encode('ascii'))
 
     reply = sock.recv(1024)
-    if reply[0:3] == '[P]' and reply[5:] == '\x06\r\n':
-        interval = ord(reply[4])
+    if reply[0:3] == b'[P]' and reply[5:] == b'\x06\r\n':
+        interval = reply[4]
         print("POLL OK")
         print("Server requested polling interval %u minutes" % (interval))
     else:
-        print("Bad reply to poll:", reply.strip())
+        print("Bad reply to poll: %s" % (reply))
 
 def contactid(sock, account, qualifier, event, zone_or_user):
     account = ("%04u" % (account)).replace('0','A')
@@ -67,14 +68,14 @@ def contactid(sock, account, qualifier, event, zone_or_user):
         checkdigit = '0'
 
     # Wrap in Texecom wrapper
-    sock.send('2' + msg + checkdigit + '\r\n')
+    sock.send(('2' + msg + checkdigit + '\r\n').encode('ascii'))
 
     # Wait for ACK
     reply = sock.recv(1024)
-    if reply == '2\x06\r\n':
+    if reply == b'2\x06\r\n':
         print("Ack received OK")
     else:
-        print("Bad reply to message:", strip(reply))
+        print("Bad reply to message: %s" % (reply))
 
 
 def sia(sock, account, event, zone_or_user, name):
@@ -86,23 +87,22 @@ def sia(sock, account, event, zone_or_user, name):
         recs = recs + [ "A%s" % (name) ]
 
     # Add start byte and checksum for each record
-    msg = ''
+    msg = b''
+    recs = [r.encode('ascii') for r in recs] # Convert records from str to binary
     for rec in recs:
-        rec = chr(0xc0 + len(rec) - 1) + rec
-        checksum = 0xff
-        for c in rec:
-            checksum ^= ord(c)
-        msg = msg + rec + chr(checksum)
+        rec = bytes([0xc0 + len(rec) - 1]) + rec
+        checksum = 0xff ^ reduce(lambda x,y: x^y, rec)
+        msg += rec + bytes([checksum])
 
     # Add terminator and wrap in Texecom wrapper for sending
-    sock.send('3' + msg + '\x40\x30\x8f' + '\r\n')
+    sock.send(b'3' + msg + b'\x40\x30\x8f\r\n')
 
     # Wait for ACK
     reply = sock.recv(1024)
-    if reply == '3\x06\r\n':
+    if reply == b'3\x06\r\n':
         print("Ack received OK")
     else:
-        print("Bad reply to message:", reply.strip())
+        print("Bad reply to message: %s" % (reply))
 
 
 # List of tests along with ContactID and SIA event codes

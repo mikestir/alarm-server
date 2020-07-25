@@ -28,6 +28,7 @@ import time
 from datetime import datetime, timedelta
 from threading import Thread, Lock
 from binascii import hexlify
+from functools import reduce
 
 APP_NAME = 'alarmserver'
 CONFIG_FILE = '/etc/alarmserver/alarmserver.conf'
@@ -133,12 +134,12 @@ class AccountManager(object):
 		else:
 			info['event'] = 'Polling timeout'
 			msg = 'Polling timeout'
-		self.mqtt_client.publish("/alarms/%s/event" % (account), json.dumps(info), qos=1, retain=False)
-		self.mqtt_client.publish("/alarms/%s/message" % (account), msg, qos=1, retain=False)
+		self.mqtt_client.publish("alarms/%s/event" % (account), json.dumps(info), qos=1, retain=False)
+		self.mqtt_client.publish("alarms/%s/message" % (account), msg, qos=1, retain=False)
 
 	def start_polling_watchdog(self):
 		# Initialise polling timeouts
-		for k,acc in self.accounts.iteritems():
+		for k,acc in self.accounts.items():
 			acc['timeout'] = datetime.now() + self.polling_timeout
 
 		# Start timer for polling monitor
@@ -158,7 +159,7 @@ class AccountManager(object):
 			# Check for missed polls every few seconds.  Doesn't really
 			# matter if we are a few seconds late
 			now = datetime.now()
-			for k,acc in self.accounts.iteritems():
+			for k,acc in self.accounts.items():
 				if acc['timeout'] < now:
 					# Account has missed a poll event
 					acc['missed'] = acc['missed'] + 1
@@ -286,12 +287,12 @@ class ContactId(EventParser):
 		if len(msg) != 16:
 			self.error("Invalid message size %u" % (len(msg)))
 			return
-		if msg[4:6] != '18' and msg[4:6] != '98':
+		if msg[4:6] != b'18' and msg[4:6] != b'98':
 			self.error("Invalid message type %s" % (msg[4:6]))
 			return
 
 		# Parse fields
-		account = msg[0:4].replace('A','0')
+		account = msg[0:4].decode('ascii').replace('A','0')
 		try:
 			qualifier = int(msg[6:7])
 			event = int(msg[7:10])
@@ -629,44 +630,42 @@ class SIA(EventParser):
 	
 	def parse_record(self, data):
 		try:
-			rectype = ord(data[0]) & 0xc0
-			payloadlength = ord(data[0]) & 0x3f
-			payloadtype = data[1]
+			rectype = data[0] & 0xc0
+			payloadlength = data[0] & 0x3f
+			payloadtype = data[1:2]
 			payload = data[2:2 + payloadlength]
 			nextrec = data[3 + payloadlength:]
 		except IndexError:
 			self.error('Record parse error')
-			return ('', '', '')
+			return (b'', b'', b'')
 		
 		# Verify check byte
-		check = 0xff
-		for a in data[:3 + payloadlength]:
-			check ^= ord(a)
-		if check != 0:
+		checksum = 0xff ^ reduce(lambda x,y: x^y, data[:3 + payloadlength])
+		if checksum != 0:
 			self.error('Check byte error')
-			return ('', '', '')
+			return (b'', b'', b'')
 		
 		if rectype == 0xc0:
 			return (payloadtype, payload, nextrec)
 		else:
-			return ('', '', nextrec)
+			return (b'', b'', nextrec)
 	
-	def __init__(self, client_ip, message):
+	def __init__(self, client_ip, msg):
 		self.client_ip = client_ip
 		
-		while message:
-			(t, payload, message) = self.parse_record(message)
+		while msg:
+			(t, payload, msg) = self.parse_record(msg)
 			
-			self.debug(t + ' ' + payload)
+			self.debug("%s" % (t + b' ' + payload))
 			
-			if t == '#':
-				self.account_number = payload
-			elif t == 'A':
-				self.extra_text = payload
-			elif t == 'N':
+			if t == b'#':
+				self.account_number = payload.decode('ascii')
+			elif t == b'A':
+				self.extra_text = payload.decode('ascii')
+			elif t == b'N':
 				try:
-					area = int(payload[2])
-					event_code = payload[3:5]
+					area = int(payload[2:3])
+					event_code = payload[3:5].decode('ascii')
 					value = int(payload[5:8])
 				except:
 					self.error("Payload parse error")
@@ -693,10 +692,10 @@ class TexecomService(socketserver.BaseRequestHandler):
 	FLAG_ENGINEER = 16
 
 	def handle_poll(self, data):
-		self.debug(data)
+		self.debug("%s" % (data))
 
 		try:
-			parts = data[4:].strip().split('#')
+			parts = (data[4:].decode('ascii')).strip().split('#')
 			account = parts[0]
 			flags = ord(parts[1][0])
 		except:
@@ -713,7 +712,7 @@ class TexecomService(socketserver.BaseRequestHandler):
 
 		# Send ack/polling delay in minutes
 		interval = self.server.account_manager.get_polling_interval(account)
-		self.request.send('[P]\x00' + chr(interval) + '\x06\r\n')
+		self.request.send(b'[P]\x00' + bytes([interval]) + b'\x06\r\n')
 
 		# Record poll event
 		self.server.account_manager.polled(account)
@@ -732,7 +731,7 @@ class TexecomService(socketserver.BaseRequestHandler):
 			'armed': (flags & self.FLAG_ARMED) > 0,
 			'engineer': (flags & self.FLAG_ENGINEER) > 0,
 			}
-		self.server.mqtt_client.publish("/alarms/%s/status" % (account), json.dumps(info), qos=1, retain=True)
+		self.server.mqtt_client.publish("alarms/%s/status" % (account), json.dumps(info), qos=1, retain=True)
 
 	def handle_message(self, data, parser):
 		# Parse message
@@ -749,7 +748,7 @@ class TexecomService(socketserver.BaseRequestHandler):
 			return
 		
 		# Send ACK
-		self.request.send(data[0] + '\x06\r\n')
+		self.request.send(data[0:1] + b'\x06\r\n')
 		
 		# Post event message to broker (not retained)
 		info = {
@@ -763,11 +762,11 @@ class TexecomService(socketserver.BaseRequestHandler):
 			'value_type': message.value_name,
 			'extra_text': message.extra_text,
 			}
-		self.server.mqtt_client.publish("/alarms/%s/event" % (message.account_number), json.dumps(info), qos=1, retain=False)
+		self.server.mqtt_client.publish("alarms/%s/event" % (message.account_number), json.dumps(info), qos=1, retain=False)
 		msg = "Area %d %s %s %d" % (message.area, message.event, message.value_name, message.value)
 		if message.extra_text:
 			msg = msg + " (" + message.extra_text + ")"
-		self.server.mqtt_client.publish("/alarms/%s/message" % (message.account_number), msg, qos=1, retain=False)
+		self.server.mqtt_client.publish("alarms/%s/message" % (message.account_number), msg, qos=1, retain=False)
 
 	def handle(self):
 		self.debug("Client connected from %s:%s" % (self.client_address[0], self.client_address[1]))
@@ -778,30 +777,30 @@ class TexecomService(socketserver.BaseRequestHandler):
 				break
 			
 			# Dump raw packet
-			self.debug('RAW: ' + hexlify(data))
+			self.debug('RAW: %s' % (hexlify(data)))
 
-			if data[0:3] == '+++':
+			if data[0:3] == b'+++':
 				# End of transmission - we'll got a TCP disconnection after this
 				# so just ignore this silently
 				continue
 			
 			# All other messages should have <CR><LF> terminator which we
 			# can remove
-			if data[-2:] != '\r\n':
+			if data[-2:] != b'\r\n':
 				self.error("Ignoring line with missing terminator")
 				continue
 			data = data[:-2]
 			
 			# Determine packet type and pass to handler
-			if data[0:4] == 'POLL':
+			if data[0:4] == b'POLL':
 				# Polling packet
 				self.handle_poll(data)
-			elif data[0] == '2':
+			elif data[0:1] == b'2':
 				self.handle_message(data, ContactId)
-			elif data[0] == '3':
+			elif data[0:1] == b'3':
 				self.handle_message(data, SIA)
 			else:
-				self.error("Unhandled message: " + hexlify(data))
+				self.error("Unhandled message: %s" % (hexlify(data)))
 
 		self.debug("Client disconnected")
 		self.request.close()
@@ -838,7 +837,7 @@ def main():
 		client.tls_set(MQTT_CAFILE)
 	if MQTT_USERNAME and MQTT_PASSWORD:
 		client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
-	client.connect(MQTT_HOST, MQTT_PORT, 60)
+	client.connect_async(MQTT_HOST, MQTT_PORT, 60)
 	client.loop_start()
 
 	# Start ARC server
